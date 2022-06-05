@@ -359,7 +359,7 @@ export function collectTypeVarsInGenericFuncDef(env: GlobalTypeEnv, type: Type) 
 
   if (type.tag === "callable") {
     // Letting return be as is, it'll throw an error if type var is not one from the params
-    return type.params.map(p => collectTypeVarsInGenericFuncDef(env, p)).flat();
+    return [...type.params.map(p => collectTypeVarsInGenericFuncDef(env, p)).flat(), ...collectTypeVarsInGenericFuncDef(env, type.ret)];
   }
 
   return [];
@@ -422,15 +422,11 @@ export function tc(env: GlobalTypeEnv, program: Program<Annotation>): [Program<A
   const tInits = program.inits.map(init => tcInit(newEnv, init, SRC));
   resolveFuncGenericTypes(newEnv);
 
-  // Resolve generic class typevars before typechecking
+  // Resolve class typevars before typechecking
   // all classes to avoid ordering dependencies with
   // superclasses.
   const rClasses = program.classes.map(cls => {
-    if(cls.typeParams.length !== 0) {
       return resolveClassTypeParams(newEnv, cls, SRC)
-    } else {
-      return cls;
-    }
   });
   const tClasses = rClasses.map(cls => {
     if(cls.typeParams.length === 0) {
@@ -558,25 +554,35 @@ export function resolveClassTypeParams(env: GlobalTypeEnv, cls: Class<Annotation
     return [name, newArgs];
   }));
 
+
   let newFieldsTy = new Map(Array.from(fieldsTy.entries()).map(([name, type]) => {
     let newType = resolveTypeTypeParams(cls.typeParams, type);
     return [name, newType];
   }));
 
   let newMethodsTy: Map<string, [Type[], Type]> = new Map(Array.from(methodsTy.entries()).map(([name, [params, ret]]) => {
-    let newRet = resolveTypeTypeParams(cls.typeParams, ret); 
+
+    const usedtypeVars = params.map(p => collectTypeVarsInGenericFuncDef(env, p)).flat();
+    const classTypeVars = cls.typeParams;
+    const allowedTypeVars = Array.from(new Set([...classTypeVars, ...usedtypeVars]));
+
     let newParams = params.map(p => {
-      let newP = resolveTypeTypeParams(cls.typeParams, p);
+      let newP = resolveTypeTypeParams(allowedTypeVars, p);
       return newP;
     });
-
+    let newRet = resolveTypeTypeParams(allowedTypeVars, ret); 
     return [name, [newParams, newRet]];
   }));
 
   env.classes.set(cls.name, [newFieldsTy, newMethodsTy, newSuperCls, typeparams]);
 
   let newFields = cls.fields.map(field => resolveVarInitTypeParams(cls.typeParams, field));
-  let newMethods = cls.methods.map(method => resolveFunDefTypeParams(cls.typeParams, method));
+  let newMethods = cls.methods.map(method => {
+    const usedtypeVars = method.parameters.map(p => collectTypeVarsInGenericFuncDef(env, p.type)).flat();
+    const classTypeVars = cls.typeParams;
+    const allowedTypeVars = Array.from(new Set([...classTypeVars, ...usedtypeVars]));
+    return resolveFunDefTypeParams(allowedTypeVars, method);
+  });
 
   return {...cls, fields: newFields, methods: newMethods};
 }
@@ -1197,9 +1203,11 @@ export function tcExpr(env: GlobalTypeEnv, locals: LocalTypeEnv, expr: Expr<Anno
           if (methods.has(expr.method)) {
             const [methodArgs, methodRet] = specializeMethodType(env, tObj.a.type, methods.get(expr.method));
             const realArgs = [tObj].concat(tArgs);
+            const tenv : Map<string, Type> = new Map();
             if (methodArgs.length === realArgs.length &&
-              methodArgs.every((argTyp, i) => isAssignable(env, realArgs[i].a.type, argTyp))) {
-              return { ...expr, a: { ...expr.a, type: methodRet }, obj: tObj, arguments: tArgs };
+              methodArgs.every((argTyp, i) =>  checkAssignabilityOfFuncCallLocalParams(env, tenv, argTyp, realArgs[i].a.type))) {
+              let ret = specializeType(tenv, methodRet);
+              return { ...expr, a: { ...expr.a, type: ret }, obj: tObj, arguments: tArgs };
             } else {
               const argTypesStr = methodArgs.map(argType => bigintSafeStringify(argType.tag)).join(", ");
               const tArgsStr = realArgs.map(tArg => bigintSafeStringify(tArg.a.type.tag)).join(", ");

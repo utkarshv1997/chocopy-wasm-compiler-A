@@ -1206,3 +1206,77 @@ describe('Generics/Inheritance introp tests', () => {
       sb = b
     `);
 });
+
+describe('Generic Functions as Methods', () => {
+  assertTC(`should type-check non-generic class with generic function as method`, `
+      T = TypeVar('T')
+
+      class Box():
+        v: int = 0
+
+        def bar(self: Box, t: T) -> T:
+          return t
+
+
+      b : Box = None
+      b = Box()
+      b.bar(1)
+      b.bar(True) 
+    `, BOOL);
+
+  assertTC(`should type-check generic class with generic function as method`, `
+      T = TypeVar('T')
+      U = TypeVar('U')
+
+      class Box(Generic[T]):
+        v: T = __ZERO__
+
+        def bar(self: Box[T], u: U) -> U:
+          return u
+
+
+      b : Box[bool] = None
+      b = Box()
+      b.bar(True)     
+      b.bar(1)
+  `, NUM);
+
+  assertTCFail(`should type-check and error when generic function as method uses previously unused typevar for return type`, `
+      T = TypeVar('T')
+      U = TypeVar('U')
+      V = TypeVar('V')
+
+      class Box(Generic[T]):
+        v: T = __ZERO__
+
+        def bar(self: Box[T], u: U) -> V:
+          v: V = __ZERO__
+          return v
+
+
+      b : Box[bool] = None
+      b = Box()
+      b.bar(True)     
+      b.bar(1)
+  `);
+
+  assertTC(`should type-check generic class with generic function as method and callable`, `
+      T = TypeVar('T')
+      U = TypeVar('U')
+
+      class Box(Generic[T]):
+        v: T = __ZERO__
+
+        def map(self: Box[T], f: Callable[[T], U]) -> Box[U]:
+          b : Box[U] = None
+          b = Box()
+          b.v = f(self.v)
+          return b
+
+
+      b : Box[int] = None
+      f : Callable[[int], bool] = None
+      b = Box()
+      b.map(mklambda(Callable[[int], bool], lambda x: x % 2 == 0)).v
+  `, BOOL);
+});
