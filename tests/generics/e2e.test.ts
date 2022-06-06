@@ -616,3 +616,64 @@ describe('Generics and Lists - e2e tests', () => {
   `
   assertPrint('Generics and Lists - 0', prog0, ["False"]);
 });
+
+describe('Generic Functions as Methods - e2e tests', () => {
+  const prog0 = `
+  T = TypeVar('T')
+
+  class Box():
+    v: int = 0
+
+    def bar(self: Box, t: T) -> T:
+      return t
+
+
+  b : Box = None
+  b = Box()
+  print(b.bar(1))
+  print(b.bar(True))
+  `
+  assertPrint(`print non-generic class with generic function as method`, prog0, ["1", "True"]);
+
+  const prog1 =  `
+  T = TypeVar('T')
+  U = TypeVar('U')
+  V = TypeVar('V')
+
+  class Box(Generic[T]):
+    v: T = __ZERO__
+
+    def bar(self: Box[T], u: U) -> U:
+      temp: U = __ZERO__
+      temp = u
+      return temp
+
+  b : Box[bool] = None
+  b = Box()
+  print(b.bar(True))
+  print(b.bar(1))
+  `;
+  
+  assertPrint(`print generic class with generic function as method`, prog1, ["True", "1"]);
+
+  const prog2 = `
+      T = TypeVar('T')
+      U = TypeVar('U')
+
+      class Box(Generic[T]):
+        v: T = __ZERO__
+
+        def map(self: Box[T], f: Callable[[T], U]) -> Box[U]:
+          b : Box[U] = None
+          b = Box()
+          b.v = f(self.v)
+          return b
+
+
+      b : Box[int] = None
+      f : Callable[[int], bool] = None
+      b = Box()
+      print(b.map(mklambda(Callable[[int], bool], lambda x: x % 2 == 0)).v)
+  `
+  assertPrint(`print generic class with generic function as method and callable`, prog2, ["True"]);
+});

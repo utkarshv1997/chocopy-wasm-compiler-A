@@ -7,13 +7,14 @@ export type GlobalMorphEnv = {
     typeVars: Map<string, Type>,
     morphedClasses: Set<string>,
     morphedFuncs: Set<string>,
-    genericFuncs: Set<string>
+    genericFuncs: Set<string>,
+    morphedMethods: Map<string, Set<string>>,
 }
 
 export function concretizeGenericTypes(type: Type, genv: GlobalMorphEnv) : Type {
     switch(type.tag) {
         case "typevar":
-            return genv.typeVars.get(type.name);
+            return genv.typeVars.has(type.name) ? genv.typeVars.get(type.name): type;
         case "class":
             const cparams = type.params.map(p => concretizeGenericTypes(p, genv));
             return {...type, params: cparams};
@@ -40,6 +41,8 @@ export function resolveZero(type: Type, a: Annotation) : Literal<Annotation> {
             return { a: { ...a, type: NONE}, tag: "none" };
         case "callable":
             return { a: {...a, type: NONE}, tag: "none" };
+        case "typevar":
+            return { a: {...a, type}, tag: "zero"};
     }
 }
 
@@ -53,7 +56,7 @@ export function isTypeGeneric(type: Type) : Boolean {
     }
 
     if (type.tag === "callable") {
-        return type.params.some(p => isTypeGeneric(p));
+        return type.params.some(p => isTypeGeneric(p)) || isTypeGeneric(type.ret);
     }
 
     return false;
@@ -82,6 +85,60 @@ export function inferGenericFuncParamTypes(env: Map<string, Type>, pType: Type, 
       pType.params.forEach((p, i) => inferGenericFuncParamTypes(env, p, argType.params[i]));
       inferGenericFuncParamTypes(env, pType.ret, argType.ret);
     }
+}
+
+export function processMethodCall(genv: GlobalMorphEnv, objExpr: Expr<Annotation>, argsExprs: Expr<Annotation>[], methodName: string, prog: Program<Annotation>) : string {
+  if(objExpr.a.type.tag === "class") {
+    const classes = prog.classes;
+    //@ts-ignore we checked the tag above
+    let objCls = classes.find(clazz => clazz.name === objExpr.a.type.name);
+    if(!objCls) {
+      return methodName;
+    }
+    let method = objCls.methods.find(m => m.name === methodName);
+    if(!method) {
+      return methodName;
+    }
+    if(isGenericFunc(method)) {
+        let env : Map<string, Type> = new Map();
+        argsExprs.forEach((arg, i) => {
+          inferGenericFuncParamTypes(env, method.parameters[i + 1].type, arg.a.type);
+        });
+
+        let suf : string = "";
+        env.forEach((v, _) => suf += getCanonicalTypeName(v) + "$");
+        const canonicalMethodName = methodName + "$" + suf;
+        if(!genv.morphedMethods.has(objCls.name)) {
+          genv.morphedMethods.set(objCls.name, new Set());
+        }
+
+        let clsMorphedMethods = genv.morphedMethods.get(objCls.name);
+        if(clsMorphedMethods.has(canonicalMethodName)) {
+          return canonicalMethodName;
+        }
+
+        env.forEach((v, k) => genv.typeVars.set(k, v));
+        const mParameters = method.parameters.map(p => {
+          const ptype = processType(concretizeGenericTypes(p.type, genv), classes, genv, prog);
+          return { ...p, type : ptype };
+        });
+        const mInits = method.inits.map(init => {
+          init.type = processType(concretizeGenericTypes(init.type, genv), classes, genv, prog);
+          if(init.value.tag === "zero") {
+            init.value = resolveZero(init.type, init.a);
+          }
+          return init;
+        });
+
+        const mret = processType(concretizeGenericTypes(method.ret, genv), classes, genv, prog);
+        const mBody = method.body.map(bstmt => processStmts(bstmt, genv, prog));
+        const mmethod = { ...method, name: canonicalMethodName, parameters: mParameters, inits: mInits, ret: mret, body: mBody };
+        objCls.methods.push(mmethod);
+        return mmethod.name;
+    } else {
+      return method.name;
+    }
+  }
 }
 
 export function processFuncCall(genv: GlobalMorphEnv, expr: Expr<Annotation>, prog: Program<Annotation>) : FunDef<Annotation>  {
@@ -148,8 +205,12 @@ export function processExprs(expr: Expr<Annotation>, genv: GlobalMorphEnv, prog:
             return { ...expr, a: {...expr.a, type: getCanonicalType(expr.a.type)}, fn: fnExpr, arguments: cExprs };
         case "construct":
             expr.a.type = concretizeGenericTypes(expr.a.type, genv);
-            const constructCname = getCanonicalTypeName(expr.a.type)
-            return { ...expr, a: {...expr.a, type: CLASS(constructCname)}, name: constructCname };
+            if(!isTypeGeneric(expr.a.type)) {
+              const constructCname = getCanonicalTypeName(expr.a.type)
+              return { ...expr, a: {...expr.a, type: CLASS(constructCname)}, name: constructCname };
+            }
+
+            return { ...expr, a: {...expr.a, type: expr.a.type}};
         case "id":
             expr.a.type = concretizeGenericTypes(expr.a.type, genv);
             return { ...expr, a: {...expr.a, type: getCanonicalType(expr.a.type)} };
@@ -165,8 +226,11 @@ export function processExprs(expr: Expr<Annotation>, genv: GlobalMorphEnv, prog:
         case "method-call":
             const mcExprs = expr.arguments.map(a => processExprs(a, genv, prog));
             const mcObj = processExprs(expr.obj, genv, prog);
+
+            const mcMethod = processMethodCall(genv, mcObj, mcExprs, expr.method, prog);
+
             expr.a.type = concretizeGenericTypes(expr.a.type, genv);
-            return { ...expr, a: {...expr.a, type: getCanonicalType(expr.a.type)}, arguments: mcExprs, obj: mcObj };
+            return { ...expr, a: {...expr.a, type: getCanonicalType(expr.a.type)}, method: mcMethod, arguments: mcExprs, obj: mcObj };
         case "uniop":
             const uexpr = processExprs(expr.expr, genv, prog);
             expr.a.type = concretizeGenericTypes(expr.a.type, genv);
@@ -345,6 +409,7 @@ export function getCanonicalTypeName(t : Type) : string {
 }
 
 export function getCanonicalType(t: Type) : Type {
+  try {
   switch(t.tag) {
     case "number":
     case "bool":
@@ -363,6 +428,9 @@ export function getCanonicalType(t: Type) : Type {
       return CALLABLE(cparams, cret);
     default:
       return t;
+  }
+  } catch(e) {
+    return t;
   }
 }
 
@@ -425,7 +493,7 @@ export function monomorphizeProgram(program: Program<Annotation>) : Program<Anno
     let funcsInx : Map<string, number> = new Map();
     program.classes.forEach((clazz, inx) => classesInx.set(clazz.name, inx));
     program.funs.forEach((func, inx) => funcsInx.set(func.name, inx));
-    let genv : GlobalMorphEnv = {classesInx, funcsInx, typeVars: new Map(), morphedClasses: new Set(), morphedFuncs: new Set(), genericFuncs: new Set()};
+    let genv : GlobalMorphEnv = {classesInx, funcsInx, typeVars: new Map(), morphedClasses: new Set(), morphedFuncs: new Set(), genericFuncs: new Set(), morphedMethods: new Map()};
     program.classes.forEach(clazz => {
       if(clazz.typeParams.length === 0) {
         monomorphizeSuperclasses(clazz, program.classes, genv, program);
@@ -437,8 +505,13 @@ export function monomorphizeProgram(program: Program<Annotation>) : Program<Anno
         }
     });
     const inits = processInits(program.inits, program.classes, genv, program);
-    const monoMorphizedClasses = program.classes.filter(clazz => clazz.typeParams.length === 0);
     const processedStmts = program.stmts.map(s => processStmts(s, genv, program));
+    const monoMorphizedClasses = program.classes
+      .filter(clazz => clazz.typeParams.length === 0)
+      .map(clazz => {
+        const monoMorphizedMethods = clazz.methods.filter(m => !isGenericFunc(m));
+        return {...clazz, methods: monoMorphizedMethods};
+      });
     const monomorphizedFuncs = program.funs.filter(f => !genv.genericFuncs.has(f.name));
     return { ...program, inits, classes: monoMorphizedClasses, typeVarInits: [], stmts: processedStmts, funs: monomorphizedFuncs };
 }
